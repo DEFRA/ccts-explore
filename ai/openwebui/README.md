@@ -85,7 +85,7 @@ az storage share create \
 
 | File | Container group | Storage | Notes |
 |------|-----------------|---------|--------|
-| `openwebui-snd1.json` | `openwebui-snd1` | Azure Files (`openwebui-data-test` in template) | Default for `deploy.sh`. Includes **`dnsConfig`** when using spoke DNS. |
+| `openwebui-snd1.json` | `openwebui-snd1` | Azure Files (`openwebui-data-test` in template) | Default for `deploy.sh`. Replace **`<subscription-id>`**, **`<vnet-resource-group>`**, **`<vnet-name>`**, **`<subnet-name>`** in **`subnetIds`**, and **`<spoke-dns-*>`** in **`dnsConfig`**, with values for your environment (see **plt-config** for spoke **`dnsServers`**). |
 
 Add other JSON files (e.g. local-only, other environments) alongside and pass them as the template argument to `deploy.sh` (after the required scope flags).
 

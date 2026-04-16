@@ -59,12 +59,12 @@
     },
     "subnetIds": [
       {
-        "id": "/subscriptions/7f8da4be-7fd1-469f-a34f-fe89fa5d24d2/resourceGroups/SNDAIEINFRGP1401/providers/Microsoft.Network/virtualNetworks/SNDAIENETVNT1401/subnets/SNDAIENETSUB1401",
-        "name": "SNDAIENETSUB1401"
+        "id": "/subscriptions/<subscription-id>/resourceGroups/<vnet-resource-group>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/<subnet-name>",
+        "name": "<subnet-name>"
       }
     ],
     "dnsConfig": {
-      "nameServers": ["10.176.0.4", "10.176.0.5"]
+      "nameServers": ["<spoke-dns-1>", "<spoke-dns-2>"]
     },
     "volumes": [
       { "name": "proxy-caddyfile", "emptyDir": {} },
