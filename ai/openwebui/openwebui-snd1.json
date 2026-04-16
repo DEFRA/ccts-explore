@@ -1,0 +1,83 @@
+{
+  "apiVersion": "2021-07-01",
+  "name": "openwebui-snd1",
+  "location": "uksouth",
+  "properties": {
+    "containers": [
+      {
+        "name": "openwebui",
+        "properties": {
+          "image": "ghcr.io/open-webui/open-webui:main",
+          "resources": {
+            "requests": { "cpu": 2.0, "memoryInGb": 4.0 }
+          },
+          "ports": [
+            { "port": 80 },
+            { "port": 8080 }
+          ],
+          "volumeMounts": [
+            { "name": "openwebui-data", "mountPath": "/app/backend/data" }
+          ],
+          "environmentVariables": [
+            { "name": "GLOBAL_LOG_LEVEL", "value": "DEBUG" },
+            { "name": "ENABLE_BASE_MODELS_CACHE", "value": "true" },
+            { "name": "HF_HOME", "value": "/tmp/hf_cache" },
+            { "name": "SENTENCE_TRANSFORMERS_HOME", "value": "/tmp/embedding_models" }
+          ]
+        }
+      },
+      {
+        "name": "caddy",
+        "properties": {
+          "image": "caddy:2-alpine",
+          "resources": {
+            "requests": { "cpu": 0.5, "memoryInGb": 0.5 }
+          },
+          "ports": [
+            { "port": 443 }
+          ],
+          "volumeMounts": [
+            { "name": "proxy-caddyfile", "mountPath": "/etc/caddy" },
+            { "name": "proxy-data", "mountPath": "/data" },
+            { "name": "proxy-config", "mountPath": "/config" }
+          ],
+          "command": [
+            "sh",
+            "-c",
+            "IP=$(ip -4 -o addr show 2>/dev/null | awk -F'[ /]+' '/scope global/ {print $4; exit}' || ip route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || hostname -i 2>/dev/null | awk '{print $1}'); [ -n \"$IP\" ] && ADD=\", $IP:443\" || ADD=\"\"; printf \":443, localhost:443%s {\\n    tls internal\\n    reverse_proxy localhost:8080\\n}\" \"$ADD\" > /etc/caddy/Caddyfile && exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile"
+          ]
+        }
+      }
+    ],
+    "osType": "Linux",
+    "restartPolicy": "OnFailure",
+    "ipAddress": {
+      "type": "Private",
+      "ports": [
+        { "protocol": "TCP", "port": 443 }
+      ]
+    },
+    "subnetIds": [
+      {
+        "id": "/subscriptions/<subscription-id>/resourceGroups/<vnet-resource-group>/providers/Microsoft.Network/virtualNetworks/<vnet-name>/subnets/<subnet-name>",
+        "name": "<subnet-name>"
+      }
+    ],
+    "dnsConfig": {
+      "nameServers": ["<spoke-dns-1>", "<spoke-dns-2>"]
+    },
+    "volumes": [
+      { "name": "proxy-caddyfile", "emptyDir": {} },
+      { "name": "proxy-data", "emptyDir": {} },
+      { "name": "proxy-config", "emptyDir": {} },
+      {
+        "name": "openwebui-data",
+        "azureFile": {
+          "shareName": "openwebui-data-test",
+          "storageAccountName": "containerinstance",
+          "storageAccountKey": ""
+        }
+      }
+    ]
+  }
+}
