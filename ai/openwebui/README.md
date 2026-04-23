@@ -1,6 +1,8 @@
 # Open WebUI on Azure Container Instances
 
-Multi-container group: **Open WebUI** (port 8080) and **Caddy** (HTTPS on 443) in a spoke VNet. Deploy with `deploy.sh` and JSON templates in this folder.
+**Azure Container Instances:** multi-container group with **Open WebUI** (port 8080) and **Caddy** (HTTPS on 443) in a spoke VNet — use `deploy.sh` and the JSON templates in this folder.
+
+**Azure Container Apps:** single-container **Open WebUI** only; **internal** environment (no public ingress); **HTTPS** terminated at the Container Apps ingress (no Caddy). Same image, CPU/memory, environment variables, and **Azure Files** share defaults as the ACI template — use `deploy-containerapps.sh`.
 
 Detail of Caddy below as this may be a useful pattern for other expore services requiring https. It is NOT promoted as an alternative for CCoE standard ingres patterns outside of expolorotory work. 
 
@@ -86,6 +88,7 @@ az storage share create \
 | File | Container group | Storage | Notes |
 |------|-----------------|---------|--------|
 | `openwebui-snd1.json` | `openwebui-snd1` | Azure Files (`openwebui-data-test` in template) | Default for `deploy.sh`. Replace **`<subscription-id>`**, **`<vnet-resource-group>`**, **`<vnet-name>`**, **`<subnet-name>`** in **`subnetIds`**, and **`<spoke-dns-*>`** in **`dnsConfig`**, with values for your environment (see **plt-config** for spoke **`dnsServers`**). |
+| `deploy-containerapps.sh` | `CONTAINER_APP_NAME` (default `openwebui`) | Same share/account defaults as above | No JSON file; script creates/updates the Container Apps env + app. Requires a **delegated** ACA subnet ARM ID unless `--skip-env-create`. |
 
 Add other JSON files (e.g. local-only, other environments) alongside and pass them as the template argument to `deploy.sh` (after the required scope flags).
 
@@ -129,7 +132,44 @@ Run **`./deploy.sh --help`** for a short usage summary.
 
 ---
 
+## Azure Container Apps (private, platform HTTPS)
+
+Use this when you want **Container Apps** instead of ACI: **no public endpoint** on the environment (`--internal-only`), and **TLS** handled by the **ingress proxy** (`transport: Auto`), not a Caddy sidecar. The app still mounts the same **Azure Files** share at **`/app/backend/data`** (defaults: storage account name **`containerinstance`**, share **`openwebui-data-test`**, env storage mount name **`openwebui-data`** — override with flags or env vars in the script).
+
+**Prerequisites**
+
+- Azure CLI **`containerapp`** extension: `az extension add --name containerapp --upgrade`
+- A subnet **delegated** to **`Microsoft.App/environments`**, sized per [VNet integration guidance](https://learn.microsoft.com/en-us/azure/container-apps/vnet-custom) (this is **not** the same subnet as the ACI `subnetIds` entry unless you deliberately use one subnet for both patterns).
+- Storage account key via **`STORAGE_ACCOUNT_KEY`** or **`STORAGE_ACCOUNT_RESOURCE_GROUP`** (same behaviour as `deploy.sh`), or flags **`--storage-account-key`** / **`--storage-account-resource-group`** ( **`--STORAGE_ACCOUNT_RESOURCE_GROUP`** is accepted too).
+
+**Deploy**
+
+```bash
+./deploy-containerapps.sh --help
+
+# Create internal env + app (pass your Container Apps infrastructure subnet ARM ID)
+export STORAGE_ACCOUNT_KEY='<key>'
+./deploy-containerapps.sh \
+  -g '<container-apps-rg>' \
+  -s '<subscription-id-or-name>' \
+  --infrastructure-subnet-id '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<aca-subnet>'
+
+# Environment already exists
+./deploy-containerapps.sh -g '<rg>' -s '<sub>' --skip-env-create
+```
+
+Optional: **`CONTAINER_APPS_ENV_NAME`**, **`CONTAINER_APP_NAME`** (or **`--app-name`**, or one **trailing** argument like `deploy.sh`’s template), **`LOCATION`**, **`STORAGE_ACCOUNT_NAME`**, **`FILE_SHARE_NAME`**, **`ENV_STORAGE_NAME`** (see script header and `--help`).
+
+After a successful run, the script prints the app’s **internal FQDN**; use **`https://`** from inside the VNet (platform-managed certificate on the `*.internal.*.azurecontainerapps.io` hostname). If **`az rest` PATCH** fails on your tenant API version, adjust the `api-version` in `deploy-containerapps.sh` or apply the volume mount once via the portal / exported YAML as in [Azure Files mounts](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts-azure-files).
+
+When pasting commands into zsh, avoid including the prompt (e.g. **`openwebui %`**) — a trailing **`%`** can be parsed as an extra argument; the script warns and drops a lone **`%`** / **`#`**, but a line like **`… 'RG'openwebui`** (missing newline before the prompt) can still break quoting.
+
+---
+
 ## Troubleshooting
+
+**Subscription “misspelled” on `storage account keys list` after `deploy-containerapps.sh` prints “Fetching storage account key…”**  
+Login is often correct: some Azure CLI builds mishandle a global **`--subscription`** placed immediately after **`az`** when the next group is **`storage`**. The script now passes **`--subscription`** at the **end** of the command (same pattern as **`deploy.sh`**). Pull the latest **`deploy-containerapps.sh`** or upgrade Azure CLI if you still see it.
 
 ```bash
 az container show -g <rg> -n <container-group> --query "containers[].{name:name,state:instanceView.currentState.state,detail:instanceView.currentState.detailStatus}" -o table
@@ -139,4 +179,11 @@ az container logs -g <rg> -n <container-group> --container caddy
 ```
 
 **Browser TLS warnings** with **`tls internal`**: expected until the local CA is trusted or you use a corporate PKI / public hostname.
+
+**Container Apps** (internal ingress uses a platform cert on the internal FQDN; corporate trust policies may still warn):
+
+```bash
+az containerapp show -g <rg> -n <app> --query "{state:properties.provisioningState,fqdn:properties.configuration.ingress.fqdn}" -o yaml
+az containerapp logs show -g <rg> -n <app> --follow
+```
 
