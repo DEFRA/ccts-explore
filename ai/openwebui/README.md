@@ -1,8 +1,12 @@
-# Open WebUI on Azure Container Instances
+# Open WebUI on Azure
 
-Multi-container group: **Open WebUI** (port 8080) and **Caddy** (HTTPS on 443) in a spoke VNet. Deploy with `deploy.sh` and JSON templates in this folder.
+This folder is an **exploratory** setup for running **Open WebUI** in a Defra-style spoke VNet.
 
-Detail of Caddy below as this may be a useful pattern for other expore services requiring https. It is NOT promoted as an alternative for CCoE standard ingres patterns outside of expolorotory work. 
+**Where Open WebUI runs:** use **Azure Container Instances** with **`deploy.sh`** and the JSON templates — **Open WebUI** on port **8080**, optionally fronted in the same group by **Caddy** on **443** using **`tls internal`** (self-signed / internal CA). That is appropriate when you accept browser or client trust warnings for a spike. Caddy is documented in detail below; it is **not** a substitute for standard CCoE ingress (AGW, AFD, CDP, etc.) outside exploratory work.
+
+**Managed TLS at the edge (no self-signed cert on the Container Apps URL):** use **`deploy-containerapps-nginx-proxy.sh`** to run **nginx** on **Azure Container Apps** as a reverse proxy to an **HTTPS** upstream (for example your ACI/Caddy **private** endpoint). **Ingress** on the Container App uses a **platform-managed certificate** on the ACA FQDN. The upstream may still use a self-signed certificate; nginx is configured with **`proxy_ssl_verify off`**. 
+
+**Why not run everything in Container Apps** Running Open WebUI **on** Container Apps with **Azure Files** for persistence was **unreliable** in evaluation (mount and file-locking behaviour). Use **ACI** for the app data path; use **ACA + nginx** only if you want a stable managed-TLS entry point in front of a separate backend. Other options are available to allow Open WebUI to run reliably in Container Apps (e.g. use a PaaS database rather than local), however this was out of scope for this short spike effort.
 
 ---
 
@@ -81,11 +85,12 @@ az storage share create \
 
 ---
 
-## Templates in this folder
+## Templates and scripts in this folder
 
-| File | Container group | Storage | Notes |
+| File | What it deploys | Storage | Notes |
 |------|-----------------|---------|--------|
-| `openwebui-snd1.json` | `openwebui-snd1` | Azure Files (`openwebui-data-test` in template) | Default for `deploy.sh`. Replace **`<subscription-id>`**, **`<vnet-resource-group>`**, **`<vnet-name>`**, **`<subnet-name>`** in **`subnetIds`**, and **`<spoke-dns-*>`** in **`dnsConfig`**, with values for your environment (see **plt-config** for spoke **`dnsServers`**). |
+| `openwebui-snd1.json` | ACI group `openwebui-snd1` | Azure Files (`openwebui-data-test` in template) | Default for `deploy.sh`. Replace **`<subscription-id>`**, **`<vnet-resource-group>`**, **`<vnet-name>`**, **`<subnet-name>`** in **`subnetIds`**, and **`<spoke-dns-*>`** in **`dnsConfig`**, with values for your environment (see **plt-config** for spoke **`dnsServers`**). |
+| `deploy-containerapps-nginx-proxy.sh` | Container App (default name `openwebui`) | None — nginx only | **Deletes and recreates** the app in an **existing** Container Apps environment (default env name `openwebui-ca-env`). Proxies to **`--proxy-upstream`** with **`--backend-host`** for `Host`. See **Azure Container Apps: nginx reverse proxy**. |
 
 Add other JSON files (e.g. local-only, other environments) alongside and pass them as the template argument to `deploy.sh` (after the required scope flags).
 
@@ -129,14 +134,43 @@ Run **`./deploy.sh --help`** for a short usage summary.
 
 ---
 
-## Troubleshooting
+## Azure Container Apps: nginx reverse proxy
+
+Use **`deploy-containerapps-nginx-proxy.sh`** when you want **HTTPS to clients** using the **Container Apps ingress** certificate (managed by the platform on the app FQDN), while the **origin** is a private HTTPS service that may use a **self-signed** certificate (for example Open WebUI + Caddy on ACI).
+
+**What it does**
+
+- Requires a Container Apps **environment** that **already exists** — the script does **not** create it (it exits if the env is missing).
+- **Deletes** the target Container App if present and **creates** it again as a single **nginx** container (default image `mcr.microsoft.com/azurelinux/base/nginx:1`).
+- Injects a full **`nginx.conf`** at startup and enables **ingress** on port **80** in the container; **TLS** is **not** terminated inside nginx — **ingress** presents **HTTPS** to clients (`transport: auto`).
+- Sets **`proxy_ssl_verify off`** and **`proxy_ssl_server_name off`** toward the upstream so a self-signed backend still works.
+- Default **`--proxy-upstream`** / **`--backend-host`** point at a private IP; override for your ACI/Caddy address.
+
+**Prerequisites**
+
+- Azure CLI **`containerapp`** extension: `az extension add --name containerapp --upgrade`
+- A Container Apps **environment** in your subscription (internal or external as designed), on a subnet **delegated** to **`Microsoft.App/environments`**. Create it with the portal or **`az containerapp env create`** — see [Networking in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/networking) and [VNet integration](https://learn.microsoft.com/en-us/azure/container-apps/vnet-custom).
+- Network path from the ACA environment to your **upstream** (private IP or DNS name).
+
+**Deploy**
 
 ```bash
-az container show -g <rg> -n <container-group> --query "containers[].{name:name,state:instanceView.currentState.state,detail:instanceView.currentState.detailStatus}" -o table
-az container show -g <rg> -n <container-group> -o json --query "containers[].instanceView"
-az container logs -g <rg> -n <container-group> --container openwebui
-az container logs -g <rg> -n <container-group> --container caddy
+./deploy-containerapps-nginx-proxy.sh --help
+
+# Internal ingress (portal: "Limited to Container Apps environment") — default
+./deploy-containerapps-nginx-proxy.sh -g '<container-app-rg>' -s '<subscription-id-or-name>'
+
+# Public FQDN / external ingress (managed cert on the public ACA hostname)
+./deploy-containerapps-nginx-proxy.sh -g '<container-app-rg>' -s '<subscription-id-or-name>' --ingress-external
+
+# Custom upstream (HTTPS URL) and Host header sent to the backend
+./deploy-containerapps-nginx-proxy.sh -g '<rg>' -s '<sub>' \
+  --proxy-upstream 'https://10.179.128.4' \
+  --backend-host '10.179.128.4'
 ```
 
-**Browser TLS warnings** with **`tls internal`**: expected until the local CA is trusted or you use a corporate PKI / public hostname.
+Optional: **`--environment-name`**, **`--app-name`**, **`--location`**, **`--image`**, or **`INGRESS_EXTERNAL=1`** instead of **`--ingress-external`**.
 
+The script prints the app **FQDN** when finished. For **internal** ingress, use **`https://`** from the VNet; corporate trust policies may still apply.
+
+When pasting commands into zsh, avoid copying the shell prompt — a stray **`%`** can break the line.
