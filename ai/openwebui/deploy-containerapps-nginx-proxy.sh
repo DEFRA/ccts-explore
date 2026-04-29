@@ -56,10 +56,10 @@ Optional:
 The existing Container App is deleted and recreated with nginx only (no Azure Files volumes).
 
 Example (internal ingress — default):
-  ./deploy-containerapps-nginx-proxy.sh -g SNDAIEEXPRGP1401 -s AZR-AIE-SND1
+  ./deploy-containerapps-nginx-proxy.sh -g [Resource Group] -s [Subscription]
 
 Example (public / external ingress):
-  ./deploy-containerapps-nginx-proxy.sh -g SNDAIEEXPRGP1401 -s AZR-AIE-SND1 --ingress-external
+  ./deploy-containerapps-nginx-proxy.sh -g [Resource Group] -s [Subscription] --ingress-external
 EOF
 }
 

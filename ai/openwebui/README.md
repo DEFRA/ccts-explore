@@ -64,7 +64,7 @@ The Caddy container runs a **startup command** that:
 
 ## Open WebUI: persistent storage and caches
 
-Recommended for all but the smallest of trials. **This applies to the ACI deployment** (`deploy.sh` / JSON templates). Azure Container Instances can restart without warning; without persistence, configuration is lost.
+Recommended for all but the smallest of trials. Azure Container Instances can and does restart without request. Without persistence all configuration is lost.
 
 Azure Container Instances supports Azure Files for storage persistence. Azure Files should be presented on the the same VNet as a Private End Point. Storage outside the spoke (including Azure Files accessed over Public Interfaces - where allowed) traverse the Hub Firewalls. ACI may fail to negotiate and present the storage due to TLS inspection. An exception can be put in place for TLS inspection, however presenting a PEP within the spoke VNet avoids this configuration.
 
@@ -174,26 +174,3 @@ Optional: **`--environment-name`**, **`--app-name`**, **`--location`**, **`--ima
 The script prints the app **FQDN** when finished. For **internal** ingress, use **`https://`** from the VNet; corporate trust policies may still apply.
 
 When pasting commands into zsh, avoid copying the shell prompt — a stray **`%`** can break the line.
-
----
-
-## Troubleshooting
-
-```bash
-az container show -g <rg> -n <container-group> --query "containers[].{name:name,state:instanceView.currentState.state,detail:instanceView.currentState.detailStatus}" -o table
-az container show -g <rg> -n <container-group> -o json --query "containers[].instanceView"
-az container logs -g <rg> -n <container-group> --container openwebui
-az container logs -g <rg> -n <container-group> --container caddy
-```
-
-**Browser TLS warnings** on the **ACI / Caddy** URL with **`tls internal`**: expected until the local CA is trusted or you use a corporate PKI / public hostname. Prefer the **nginx / Container Apps** URL if you need a **managed** ingress cert (still subject to corporate policies).
-
-**Container Apps (nginx proxy)** — confirm ingress and FQDN; stream logs if nginx fails to start (bad upstream, missing env, etc.):
-
-```bash
-az containerapp show -g <rg> -n <app> --query "{state:properties.provisioningState,fqdn:properties.configuration.ingress.fqdn}" -o yaml
-az containerapp logs show -g <rg> -n <app> --follow
-```
-
-**404 from nginx inside the container** usually means the generated config was not loaded; this repo uses a **standalone** `nginx -c /tmp/nginx-proxy.conf` so the proxy block is always active. Redeploy with the current **`deploy-containerapps-nginx-proxy.sh`** if you see the stock nginx 404.
-
