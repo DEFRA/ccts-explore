@@ -5,7 +5,7 @@
 # Ingress: default is internal (portal: "Limited to Container Apps environment"). That is expected for private/VNet-only
 # setups — not a misconfiguration. Use --ingress-external if you need a public endpoint ("Accepting traffic from anywhere").
 #
-# Does not create the environment or register storage — use deploy-containerapps.sh first if needed.
+# Does not create the environment — create a Container Apps environment on a delegated subnet first (Azure CLI or portal).
 #
 # Usage:
 #   ./deploy-containerapps-nginx-proxy.sh -g <rg> -s <sub> [--proxy-upstream URL] [--backend-host name]
@@ -143,7 +143,7 @@ if ! az_scoped containerapp env show \
   --name "$CONTAINER_APPS_ENV_NAME" \
   --resource-group "$RESOURCE_GROUP" &>/dev/null; then
   echo "Error: Container Apps environment '$CONTAINER_APPS_ENV_NAME' not found in $RESOURCE_GROUP." >&2
-  echo "Create it with deploy-containerapps.sh first." >&2
+  echo "Create the environment first (e.g. az containerapp env create on a subnet delegated to Microsoft.App/environments, or the portal). See Azure Container Apps networking docs." >&2
   exit 1
 fi
 
@@ -268,7 +268,7 @@ az_scoped containerapp create \
   --resource-group "$RESOURCE_GROUP" \
   --yaml "$TMPYAML"
 
-# YAML ingress is not always applied by create; match deploy-containerapps.sh and enable explicitly.
+# YAML ingress is not always applied by create; enable explicitly after create.
 echo "Enabling ${INGRESS_CLI_TYPE} ingress (target port 80, platform TLS)..."
 az_scoped containerapp ingress enable \
   --name "$CONTAINER_APP_NAME" \

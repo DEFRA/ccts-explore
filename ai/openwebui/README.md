@@ -1,10 +1,12 @@
-# Open WebUI on Azure Container Instances
+# Open WebUI on Azure
 
-**Azure Container Instances:** multi-container group with **Open WebUI** (port 8080) and **Caddy** (HTTPS on 443) in a spoke VNet — use `deploy.sh` and the JSON templates in this folder.
+This folder is an **exploratory** setup for running **Open WebUI** in a Defra-style spoke VNet.
 
-**Azure Container Apps:** single-container **Open WebUI** only; **internal** environment (no public ingress); **HTTPS** terminated at the Container Apps ingress (no Caddy). Same image, CPU/memory, environment variables, and **Azure Files** share defaults as the ACI template — use `deploy-containerapps.sh`.
+**Where Open WebUI runs:** use **Azure Container Instances** with **`deploy.sh`** and the JSON templates — **Open WebUI** on port **8080**, optionally fronted in the same group by **Caddy** on **443** using **`tls internal`** (self-signed / internal CA). That is appropriate when you accept browser or client trust warnings for a spike. Caddy is documented in detail below; it is **not** a substitute for standard CCoE ingress (AGW, AFD, CDP, etc.) outside exploratory work.
 
-Detail of Caddy below as this may be a useful pattern for other expore services requiring https. It is NOT promoted as an alternative for CCoE standard ingres patterns outside of expolorotory work. 
+**Managed TLS at the edge (no self-signed cert on the Container Apps URL):** use **`deploy-containerapps-nginx-proxy.sh`** to run **nginx** on **Azure Container Apps** as a reverse proxy to an **HTTPS** upstream (for example your ACI/Caddy **private** endpoint). **Ingress** on the Container App uses a **platform-managed certificate** on the ACA FQDN. The upstream may still use a self-signed certificate; nginx is configured with **`proxy_ssl_verify off`**. 
+
+**Why not run everything in Container Apps** Running Open WebUI **on** Container Apps with **Azure Files** for persistence was **unreliable** in evaluation (mount and file-locking behaviour). Use **ACI** for the app data path; use **ACA + nginx** only if you want a stable managed-TLS entry point in front of a separate backend. Other options are available to allow Open WebUI to run reliably in Container Apps (e.g. use a PaaS database rather than local), however this was out of scope for this short spike effort.
 
 ---
 
@@ -62,7 +64,7 @@ The Caddy container runs a **startup command** that:
 
 ## Open WebUI: persistent storage and caches
 
-Recommended for all but the smallest of trials. Azure Container Instances can and does restart without request. Without persistence all configuration is lost.
+Recommended for all but the smallest of trials. **This applies to the ACI deployment** (`deploy.sh` / JSON templates). Azure Container Instances can restart without warning; without persistence, configuration is lost.
 
 Azure Container Instances supports Azure Files for storage persistence. Azure Files should be presented on the the same VNet as a Private End Point. Storage outside the spoke (including Azure Files accessed over Public Interfaces - where allowed) traverse the Hub Firewalls. ACI may fail to negotiate and present the storage due to TLS inspection. An exception can be put in place for TLS inspection, however presenting a PEP within the spoke VNet avoids this configuration.
 
@@ -83,12 +85,12 @@ az storage share create \
 
 ---
 
-## Templates in this folder
+## Templates and scripts in this folder
 
-| File | Container group | Storage | Notes |
+| File | What it deploys | Storage | Notes |
 |------|-----------------|---------|--------|
-| `openwebui-snd1.json` | `openwebui-snd1` | Azure Files (`openwebui-data-test` in template) | Default for `deploy.sh`. Replace **`<subscription-id>`**, **`<vnet-resource-group>`**, **`<vnet-name>`**, **`<subnet-name>`** in **`subnetIds`**, and **`<spoke-dns-*>`** in **`dnsConfig`**, with values for your environment (see **plt-config** for spoke **`dnsServers`**). |
-| `deploy-containerapps.sh` | `CONTAINER_APP_NAME` (default `openwebui`) | Same share/account defaults as above | No JSON file; script creates/updates the Container Apps env + app. Requires a **delegated** ACA subnet ARM ID unless `--skip-env-create`. |
+| `openwebui-snd1.json` | ACI group `openwebui-snd1` | Azure Files (`openwebui-data-test` in template) | Default for `deploy.sh`. Replace **`<subscription-id>`**, **`<vnet-resource-group>`**, **`<vnet-name>`**, **`<subnet-name>`** in **`subnetIds`**, and **`<spoke-dns-*>`** in **`dnsConfig`**, with values for your environment (see **plt-config** for spoke **`dnsServers`**). |
+| `deploy-containerapps-nginx-proxy.sh` | Container App (default name `openwebui`) | None — nginx only | **Deletes and recreates** the app in an **existing** Container Apps environment (default env name `openwebui-ca-env`). Proxies to **`--proxy-upstream`** with **`--backend-host`** for `Host`. See **Azure Container Apps: nginx reverse proxy**. |
 
 Add other JSON files (e.g. local-only, other environments) alongside and pass them as the template argument to `deploy.sh` (after the required scope flags).
 
@@ -132,55 +134,50 @@ Run **`./deploy.sh --help`** for a short usage summary.
 
 ---
 
-## Azure Container Apps (private, platform HTTPS)
+## Azure Container Apps: nginx reverse proxy
 
-Use this when you want **Container Apps** instead of ACI: **no public endpoint** on the environment (`--internal-only`), and **TLS** handled by the **ingress proxy** (`transport: Auto`), not a Caddy sidecar. The app still mounts **Azure Files** at **`/app/backend/data`** (defaults: storage account **`containerinstance`**, share **`openwebui-containerapp`**, env storage mount name **`openwebui-data`** — override with flags or env vars).
+Use **`deploy-containerapps-nginx-proxy.sh`** when you want **HTTPS to clients** using the **Container Apps ingress** certificate (managed by the platform on the app FQDN), while the **origin** is a private HTTPS service that may use a **self-signed** certificate (for example Open WebUI + Caddy on ACI).
+
+**What it does**
+
+- Requires a Container Apps **environment** that **already exists** — the script does **not** create it (it exits if the env is missing).
+- **Deletes** the target Container App if present and **creates** it again as a single **nginx** container (default image `mcr.microsoft.com/azurelinux/base/nginx:1`).
+- Injects a full **`nginx.conf`** at startup and enables **ingress** on port **80** in the container; **TLS** is **not** terminated inside nginx — **ingress** presents **HTTPS** to clients (`transport: auto`).
+- Sets **`proxy_ssl_verify off`** and **`proxy_ssl_server_name off`** toward the upstream so a self-signed backend still works.
+- Default **`--proxy-upstream`** / **`--backend-host`** point at a private IP; override for your ACI/Caddy address.
 
 **Prerequisites**
 
 - Azure CLI **`containerapp`** extension: `az extension add --name containerapp --upgrade`
-- A subnet **delegated** to **`Microsoft.App/environments`**, sized per [VNet integration guidance](https://learn.microsoft.com/en-us/azure/container-apps/vnet-custom) (this is **not** the same subnet as the ACI `subnetIds` entry unless you deliberately use one subnet for both patterns).
-- **SMB (default):** storage account key via **`STORAGE_ACCOUNT_KEY`** or **`STORAGE_ACCOUNT_RESOURCE_GROUP`**, or **`--storage-account-key`** / **`--storage-account-resource-group`**.
-
-**NFS instead of SMB (Azure Files Premium)**
-
-Container Apps can mount **NFS** Azure Files (`NfsAzureFile`), which uses a different code path than SMB and may behave better for workloads sensitive to file locking (e.g. SQLite). This is **not** the same share type as a typical **standard** SMB share: you need a **Premium** storage account, a file share created with protocol **NFS**, the Container Apps environment on a **VNet**, and the storage account allowing access from that VNet (service endpoint or private endpoint). Disable **Secure transfer required** on the storage account for NFS. See [Use storage mounts in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts?tabs=nfs) (NFS tab) and the practical walkthrough [Setting up a NFS volume with Azure Container Apps](https://azureossd.github.io/2025/10/17/Setting-up-a-NFS-volume-with-Azure-Container-Apps/).
-
-Deploy with **`--nfs`** (or **`STORAGE_PROTOCOL=nfs`**). The script registers the share path as **`/STORAGE_ACCOUNT_NAME/FILE_SHARE_NAME`** unless you set **`--nfs-share-path`**. **`--nfs-server`** defaults to **`STORAGE_ACCOUNT_NAME.file.core.windows.net`**. A storage key is usually **not** required for NFS; upgrade the **`containerapp`** CLI extension if **`--storage-type NfsAzureFile`** is rejected.
+- A Container Apps **environment** in your subscription (internal or external as designed), on a subnet **delegated** to **`Microsoft.App/environments`**. Create it with the portal or **`az containerapp env create`** — see [Networking in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/networking) and [VNet integration](https://learn.microsoft.com/en-us/azure/container-apps/vnet-custom).
+- Network path from the ACA environment to your **upstream** (private IP or DNS name).
 
 **Deploy**
 
 ```bash
-./deploy-containerapps.sh --help
+./deploy-containerapps-nginx-proxy.sh --help
 
-# Create internal env + app (pass your Container Apps infrastructure subnet ARM ID)
-export STORAGE_ACCOUNT_KEY='<key>'
-./deploy-containerapps.sh \
-  -g '<container-apps-rg>' \
-  -s '<subscription-id-or-name>' \
-  --infrastructure-subnet-id '/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<aca-subnet>'
+# Internal ingress (portal: "Limited to Container Apps environment") — default
+./deploy-containerapps-nginx-proxy.sh -g '<container-app-rg>' -s '<subscription-id-or-name>'
 
-# Environment already exists
-./deploy-containerapps.sh -g '<rg>' -s '<sub>' --skip-env-create
+# Public FQDN / external ingress (managed cert on the public ACA hostname)
+./deploy-containerapps-nginx-proxy.sh -g '<container-app-rg>' -s '<subscription-id-or-name>' --ingress-external
 
-# NFS Premium share (no storage key required; VNet + Premium NFS share must exist first)
-./deploy-containerapps.sh -g '<rg>' -s '<sub>' --skip-env-create --nfs \
-  --storage-account-name '<premium-nfs-account>' \
-  --file-share-name '<nfs-share-name>'
+# Custom upstream (HTTPS URL) and Host header sent to the backend
+./deploy-containerapps-nginx-proxy.sh -g '<rg>' -s '<sub>' \
+  --proxy-upstream 'https://10.179.128.4' \
+  --backend-host '10.179.128.4'
 ```
 
-Optional: **`CONTAINER_APPS_ENV_NAME`**, **`CONTAINER_APP_NAME`**, **`LOCATION`**, **`STORAGE_ACCOUNT_NAME`**, **`FILE_SHARE_NAME`**, **`ENV_STORAGE_NAME`**, **`STORAGE_PROTOCOL`**, **`--nfs`**, **`--nfs-server`**, **`--nfs-share-path`** (see **`--help`**).
+Optional: **`--environment-name`**, **`--app-name`**, **`--location`**, **`--image`**, or **`INGRESS_EXTERNAL=1`** instead of **`--ingress-external`**.
 
-After a successful run, the script prints the app’s **internal FQDN**; use **`https://`** from inside the VNet (platform-managed certificate on the `*.internal.*.azurecontainerapps.io` hostname). If **`az rest` PATCH** fails on your tenant API version, adjust the `api-version` in `deploy-containerapps.sh` or apply the volume mount once via the portal / exported YAML as in [Azure Files mounts](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts-azure-files).
+The script prints the app **FQDN** when finished. For **internal** ingress, use **`https://`** from the VNet; corporate trust policies may still apply.
 
-When pasting commands into zsh, avoid including the prompt (e.g. **`openwebui %`**) — a trailing **`%`** can be parsed as an extra argument; the script warns and drops a lone **`%`** / **`#`**, but a line like **`… 'RG'openwebui`** (missing newline before the prompt) can still break quoting.
+When pasting commands into zsh, avoid copying the shell prompt — a stray **`%`** can break the line.
 
 ---
 
 ## Troubleshooting
-
-**Subscription “misspelled” on `storage account keys list` after `deploy-containerapps.sh` prints “Fetching storage account key…”**  
-Login is often correct: some Azure CLI builds mishandle a global **`--subscription`** placed immediately after **`az`** when the next group is **`storage`**. The script now passes **`--subscription`** at the **end** of the command (same pattern as **`deploy.sh`**). Pull the latest **`deploy-containerapps.sh`** or upgrade Azure CLI if you still see it.
 
 ```bash
 az container show -g <rg> -n <container-group> --query "containers[].{name:name,state:instanceView.currentState.state,detail:instanceView.currentState.detailStatus}" -o table
@@ -189,12 +186,14 @@ az container logs -g <rg> -n <container-group> --container openwebui
 az container logs -g <rg> -n <container-group> --container caddy
 ```
 
-**Browser TLS warnings** with **`tls internal`**: expected until the local CA is trusted or you use a corporate PKI / public hostname.
+**Browser TLS warnings** on the **ACI / Caddy** URL with **`tls internal`**: expected until the local CA is trusted or you use a corporate PKI / public hostname. Prefer the **nginx / Container Apps** URL if you need a **managed** ingress cert (still subject to corporate policies).
 
-**Container Apps** (internal ingress uses a platform cert on the internal FQDN; corporate trust policies may still warn):
+**Container Apps (nginx proxy)** — confirm ingress and FQDN; stream logs if nginx fails to start (bad upstream, missing env, etc.):
 
 ```bash
 az containerapp show -g <rg> -n <app> --query "{state:properties.provisioningState,fqdn:properties.configuration.ingress.fqdn}" -o yaml
 az containerapp logs show -g <rg> -n <app> --follow
 ```
+
+**404 from nginx inside the container** usually means the generated config was not loaded; this repo uses a **standalone** `nginx -c /tmp/nginx-proxy.conf` so the proxy block is always active. Redeploy with the current **`deploy-containerapps-nginx-proxy.sh`** if you see the stock nginx 404.
 
