@@ -19,15 +19,24 @@
 #   ./deploy-containerapps.sh ... my-app-name         # optional trailing app name (default: openwebui)
 #
 # Storage key: STORAGE_ACCOUNT_KEY or STORAGE_ACCOUNT_RESOURCE_GROUP (same pattern as deploy.sh).
+#
+# SMB (default): standard Azure Files share + account key.
+# NFS (--nfs or STORAGE_PROTOCOL=nfs): Azure Files Premium with an NFS share; VNet integration between the ACA env and the
+# storage account; "Secure transfer required" disabled on the storage account. Share path is /STORAGE_ACCOUNT/SHARE_NAME.
+# See https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts?tabs=nfs
 
 set -eo pipefail
+
+storage_protocol_is_nfs() {
+  [[ "$(printf '%s' "$STORAGE_PROTOCOL" | tr '[:upper:]' '[:lower:]')" == "nfs" ]]
+}
 
 DEFAULT_LOCATION="uksouth"
 DEFAULT_ENV_NAME="openwebui-ca-env"
 DEFAULT_APP_NAME="openwebui"
 DEFAULT_ENV_STORAGE_NAME="openwebui-data"
 DEFAULT_STORAGE_ACCOUNT_NAME="containerinstance"
-DEFAULT_FILE_SHARE_NAME="openwebui-data-test"
+DEFAULT_FILE_SHARE_NAME="openwebui-containerapp"
 DEFAULT_IMAGE="ghcr.io/open-webui/open-webui:main"
 
 RESOURCE_GROUP="${RESOURCE_GROUP:-}"
@@ -41,6 +50,11 @@ STORAGE_ACCOUNT_NAME="${STORAGE_ACCOUNT_NAME:-$DEFAULT_STORAGE_ACCOUNT_NAME}"
 FILE_SHARE_NAME="${FILE_SHARE_NAME:-$DEFAULT_FILE_SHARE_NAME}"
 STORAGE_ACCOUNT_KEY="${STORAGE_ACCOUNT_KEY:-}"
 STORAGE_ACCOUNT_RESOURCE_GROUP="${STORAGE_ACCOUNT_RESOURCE_GROUP:-}"
+# smb (default) or nfs — NFS uses NfsAzureFile on the Container Apps environment (see header).
+STORAGE_PROTOCOL="${STORAGE_PROTOCOL:-smb}"
+NFS_SERVER="${NFS_SERVER:-}"
+NFS_SHARE_PATH="${NFS_SHARE_PATH:-}"
+NFS_SHARE_PATH_CLI=""
 SKIP_ENV_CREATE=0
 POSITIONAL_APP_NAME=""
 EXPLICIT_APP_NAME=0
@@ -59,18 +73,25 @@ Optional:
   --app-name <name>             default: openwebui (CONTAINER_APP_NAME)
   --location <region>           default: uksouth (LOCATION)
   --storage-account-name        default: containerinstance (STORAGE_ACCOUNT_NAME)
-  --file-share-name             default: openwebui-data-test (FILE_SHARE_NAME)
+  --file-share-name             default: openwebui-containerapp (FILE_SHARE_NAME)
   --env-storage-name            env mount name; default: openwebui-data (ENV_STORAGE_NAME)
   --storage-account-key <key>   or env STORAGE_ACCOUNT_KEY
   --storage-account-resource-group <rg>   fetch key via az (or env STORAGE_ACCOUNT_RESOURCE_GROUP)
   --STORAGE_ACCOUNT_RESOURCE_GROUP <rg>   same as --storage-account-resource-group
+  --nfs                       use Azure Files over NFS (NfsAzureFile) instead of SMB; see script header for prerequisites
+  --nfs-server <host>       NFS server FQDN (default: STORAGE_ACCOUNT_NAME.file.core.windows.net)
+  --nfs-share-path <path>   share path as /account/share (default: /STORAGE_ACCOUNT_NAME/FILE_SHARE_NAME)
   --skip-env-create             do not create the Container Apps environment (must exist)
 
-Storage key (Azure Files on the env): use flags above or the same env vars as deploy.sh.
+Storage key (SMB only): STORAGE_ACCOUNT_KEY or STORAGE_ACCOUNT_RESOURCE_GROUP. NFS usually does not need a key; set one if your CLI requires it.
+
+Env: STORAGE_PROTOCOL=nfs is equivalent to --nfs.
 
 Examples:
   ./deploy-containerapps.sh -g myRg -s mySub --infrastructure-subnet-id "/subscriptions/.../subnets/ca-subnet"
   ./deploy-containerapps.sh -g myRg -s mySub --skip-env-create
+  ./deploy-containerapps.sh -g myRg -s mySub --skip-env-create --nfs \\
+    --storage-account-name mypremiumacct --file-share-name openwebui-nfs --storage-account-resource-group myRg
 
 Optional trailing argument: container app name (same habit as deploy.sh’s template file). Do not use
 if you already passed --app-name.
@@ -135,6 +156,20 @@ while [[ $# -gt 0 ]]; do
       STORAGE_ACCOUNT_RESOURCE_GROUP="$2"
       shift 2
       ;;
+    --nfs)
+      STORAGE_PROTOCOL=nfs
+      shift
+      ;;
+    --nfs-server)
+      [[ -n "${2:-}" ]] || { echo "Error: $1 requires a value." >&2; exit 1; }
+      NFS_SERVER="$2"
+      shift 2
+      ;;
+    --nfs-share-path)
+      [[ -n "${2:-}" ]] || { echo "Error: $1 requires a value." >&2; exit 1; }
+      NFS_SHARE_PATH_CLI="$2"
+      shift 2
+      ;;
     --skip-env-create)
       SKIP_ENV_CREATE=1
       shift
@@ -195,21 +230,31 @@ az_scoped() {
   az "$@" --subscription "$SUBSCRIPTION"
 }
 
-if [[ -z "${STORAGE_ACCOUNT_KEY:-}" ]]; then
-  if [[ -n "${STORAGE_ACCOUNT_RESOURCE_GROUP:-}" ]]; then
-    echo "Fetching storage account key for $STORAGE_ACCOUNT_NAME..."
-    STORAGE_ACCOUNT_KEY=$(az_scoped storage account keys list \
-      --account-name "$STORAGE_ACCOUNT_NAME" \
-      --resource-group "$STORAGE_ACCOUNT_RESOURCE_GROUP" \
-      --query '[0].value' -o tsv)
-  else
-    echo "Error: Set STORAGE_ACCOUNT_KEY or STORAGE_ACCOUNT_RESOURCE_GROUP." >&2
+if storage_protocol_is_nfs; then
+  echo "Using NFS Azure Files (NfsAzureFile). Ensure: Premium storage account, NFS file share, VNet access from the ACA subnet,"
+  echo "and 'Secure transfer required' disabled on the storage account (see Microsoft docs)."
+  nfs_server_effective="${NFS_SERVER:-${STORAGE_ACCOUNT_NAME}.file.core.windows.net}"
+  nfs_path_effective="${NFS_SHARE_PATH_CLI:-${NFS_SHARE_PATH:-}}"
+  if [[ -z "$nfs_path_effective" ]]; then
+    nfs_path_effective="/${STORAGE_ACCOUNT_NAME}/${FILE_SHARE_NAME}"
+  fi
+else
+  if [[ -z "${STORAGE_ACCOUNT_KEY:-}" ]]; then
+    if [[ -n "${STORAGE_ACCOUNT_RESOURCE_GROUP:-}" ]]; then
+      echo "Fetching storage account key for $STORAGE_ACCOUNT_NAME..."
+      STORAGE_ACCOUNT_KEY=$(az_scoped storage account keys list \
+        --account-name "$STORAGE_ACCOUNT_NAME" \
+        --resource-group "$STORAGE_ACCOUNT_RESOURCE_GROUP" \
+        --query '[0].value' -o tsv)
+    else
+      echo "Error: Set STORAGE_ACCOUNT_KEY or STORAGE_ACCOUNT_RESOURCE_GROUP (SMB), or use --nfs for NFS shares." >&2
+      exit 1
+    fi
+  fi
+  if [[ -z "$STORAGE_ACCOUNT_KEY" ]]; then
+    echo "Error: storage account key is empty." >&2
     exit 1
   fi
-fi
-if [[ -z "$STORAGE_ACCOUNT_KEY" ]]; then
-  echo "Error: storage account key is empty." >&2
-  exit 1
 fi
 
 ensure_env() {
@@ -239,17 +284,35 @@ else
   fi
 fi
 
-echo "Registering Azure Files storage on the environment (name: $ENV_STORAGE_NAME)..."
-# `env storage set` expects -n/--name for the *managed environment*, not --environment-name.
-# Omit --storage-type: some containerapp extension versions reject it; Azure Files is implied by --azure-file-*.
-az_scoped containerapp env storage set \
-  --name "$CONTAINER_APPS_ENV_NAME" \
-  --resource-group "$RESOURCE_GROUP" \
-  --storage-name "$ENV_STORAGE_NAME" \
-  --azure-file-account-name "$STORAGE_ACCOUNT_NAME" \
-  --azure-file-account-key "$STORAGE_ACCOUNT_KEY" \
-  --azure-file-share-name "$FILE_SHARE_NAME" \
-  --access-mode ReadWrite
+if storage_protocol_is_nfs; then
+  echo "Registering NFS Azure Files storage on the environment (name: $ENV_STORAGE_NAME)..."
+  nfs_storage_args=(
+    containerapp env storage set
+    --name "$CONTAINER_APPS_ENV_NAME"
+    --resource-group "$RESOURCE_GROUP"
+    --storage-name "$ENV_STORAGE_NAME"
+    --storage-type NfsAzureFile
+    --server "$nfs_server_effective"
+    --azure-file-account-name "$STORAGE_ACCOUNT_NAME"
+    --azure-file-share-name "$nfs_path_effective"
+    --access-mode ReadWrite
+  )
+  if [[ -n "${STORAGE_ACCOUNT_KEY:-}" ]]; then
+    nfs_storage_args+=(--azure-file-account-key "$STORAGE_ACCOUNT_KEY")
+  fi
+  az_scoped "${nfs_storage_args[@]}"
+else
+  echo "Registering SMB Azure Files storage on the environment (name: $ENV_STORAGE_NAME)..."
+  # `env storage set` expects -n/--name for the *managed environment*, not --environment-name.
+  az_scoped containerapp env storage set \
+    --name "$CONTAINER_APPS_ENV_NAME" \
+    --resource-group "$RESOURCE_GROUP" \
+    --storage-name "$ENV_STORAGE_NAME" \
+    --azure-file-account-name "$STORAGE_ACCOUNT_NAME" \
+    --azure-file-account-key "$STORAGE_ACCOUNT_KEY" \
+    --azure-file-share-name "$FILE_SHARE_NAME" \
+    --access-mode ReadWrite
+fi
 
 MANAGED_ENV_ID=$(az_scoped containerapp env show \
   --name "$CONTAINER_APPS_ENV_NAME" \

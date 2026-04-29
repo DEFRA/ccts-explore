@@ -134,13 +134,19 @@ Run **`./deploy.sh --help`** for a short usage summary.
 
 ## Azure Container Apps (private, platform HTTPS)
 
-Use this when you want **Container Apps** instead of ACI: **no public endpoint** on the environment (`--internal-only`), and **TLS** handled by the **ingress proxy** (`transport: Auto`), not a Caddy sidecar. The app still mounts the same **Azure Files** share at **`/app/backend/data`** (defaults: storage account name **`containerinstance`**, share **`openwebui-data-test`**, env storage mount name **`openwebui-data`** — override with flags or env vars in the script).
+Use this when you want **Container Apps** instead of ACI: **no public endpoint** on the environment (`--internal-only`), and **TLS** handled by the **ingress proxy** (`transport: Auto`), not a Caddy sidecar. The app still mounts **Azure Files** at **`/app/backend/data`** (defaults: storage account **`containerinstance`**, share **`openwebui-containerapp`**, env storage mount name **`openwebui-data`** — override with flags or env vars).
 
 **Prerequisites**
 
 - Azure CLI **`containerapp`** extension: `az extension add --name containerapp --upgrade`
 - A subnet **delegated** to **`Microsoft.App/environments`**, sized per [VNet integration guidance](https://learn.microsoft.com/en-us/azure/container-apps/vnet-custom) (this is **not** the same subnet as the ACI `subnetIds` entry unless you deliberately use one subnet for both patterns).
-- Storage account key via **`STORAGE_ACCOUNT_KEY`** or **`STORAGE_ACCOUNT_RESOURCE_GROUP`** (same behaviour as `deploy.sh`), or flags **`--storage-account-key`** / **`--storage-account-resource-group`** ( **`--STORAGE_ACCOUNT_RESOURCE_GROUP`** is accepted too).
+- **SMB (default):** storage account key via **`STORAGE_ACCOUNT_KEY`** or **`STORAGE_ACCOUNT_RESOURCE_GROUP`**, or **`--storage-account-key`** / **`--storage-account-resource-group`**.
+
+**NFS instead of SMB (Azure Files Premium)**
+
+Container Apps can mount **NFS** Azure Files (`NfsAzureFile`), which uses a different code path than SMB and may behave better for workloads sensitive to file locking (e.g. SQLite). This is **not** the same share type as a typical **standard** SMB share: you need a **Premium** storage account, a file share created with protocol **NFS**, the Container Apps environment on a **VNet**, and the storage account allowing access from that VNet (service endpoint or private endpoint). Disable **Secure transfer required** on the storage account for NFS. See [Use storage mounts in Azure Container Apps](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts?tabs=nfs) (NFS tab) and the practical walkthrough [Setting up a NFS volume with Azure Container Apps](https://azureossd.github.io/2025/10/17/Setting-up-a-NFS-volume-with-Azure-Container-Apps/).
+
+Deploy with **`--nfs`** (or **`STORAGE_PROTOCOL=nfs`**). The script registers the share path as **`/STORAGE_ACCOUNT_NAME/FILE_SHARE_NAME`** unless you set **`--nfs-share-path`**. **`--nfs-server`** defaults to **`STORAGE_ACCOUNT_NAME.file.core.windows.net`**. A storage key is usually **not** required for NFS; upgrade the **`containerapp`** CLI extension if **`--storage-type NfsAzureFile`** is rejected.
 
 **Deploy**
 
@@ -156,9 +162,14 @@ export STORAGE_ACCOUNT_KEY='<key>'
 
 # Environment already exists
 ./deploy-containerapps.sh -g '<rg>' -s '<sub>' --skip-env-create
+
+# NFS Premium share (no storage key required; VNet + Premium NFS share must exist first)
+./deploy-containerapps.sh -g '<rg>' -s '<sub>' --skip-env-create --nfs \
+  --storage-account-name '<premium-nfs-account>' \
+  --file-share-name '<nfs-share-name>'
 ```
 
-Optional: **`CONTAINER_APPS_ENV_NAME`**, **`CONTAINER_APP_NAME`** (or **`--app-name`**, or one **trailing** argument like `deploy.sh`’s template), **`LOCATION`**, **`STORAGE_ACCOUNT_NAME`**, **`FILE_SHARE_NAME`**, **`ENV_STORAGE_NAME`** (see script header and `--help`).
+Optional: **`CONTAINER_APPS_ENV_NAME`**, **`CONTAINER_APP_NAME`**, **`LOCATION`**, **`STORAGE_ACCOUNT_NAME`**, **`FILE_SHARE_NAME`**, **`ENV_STORAGE_NAME`**, **`STORAGE_PROTOCOL`**, **`--nfs`**, **`--nfs-server`**, **`--nfs-share-path`** (see **`--help`**).
 
 After a successful run, the script prints the app’s **internal FQDN**; use **`https://`** from inside the VNet (platform-managed certificate on the `*.internal.*.azurecontainerapps.io` hostname). If **`az rest` PATCH** fails on your tenant API version, adjust the `api-version` in `deploy-containerapps.sh` or apply the volume mount once via the portal / exported YAML as in [Azure Files mounts](https://learn.microsoft.com/en-us/azure/container-apps/storage-mounts-azure-files).
 
